@@ -1,57 +1,15 @@
 import time
-import hashlib
 import json
 import requests
-import base64
 from flask import Flask, request
 from multiprocessing import Process, Pipe
-import ecdsa
 
 from miner_config import MINER_ADDRESS, MINER_NODE_URL, PEER_NODES
+from block import Block, create_genesis_block
+import myUtils as myUtils
 
-# ------------------------------------ BLOCK class
-class Block:
-    def __init__(self, index, timestamp, data, previous_hash):
-        """Returns a new Block object. Each block is "chained" to its previous
-        by calling its unique hash.
-
-        Args:
-            index (int): Block number.
-            timestamp (int): Block creation timestamp.
-            data (str): Data to be sent.
-            previous_hash(str): String representing previous block unique hash.
-
-        Attrib:
-            index (int): Block number.
-            timestamp (int): Block creation timestamp.
-            data (str): Data to be sent.
-            previous_hash(str): String representing previous block unique hash.
-            hash(str): Current block unique hash.
-
-        """
-        self.index = index
-        self.timestamp = timestamp
-        self.data = data
-        self.previous_hash = previous_hash
-        self.hash = self.hash_block()
-
-    def hash_block(self):
-        """Creates the unique hash for the block. It uses sha256."""
-        sha = hashlib.sha256()
-        sha.update((str(self.index) + str(self.timestamp) + str(self.data) + str(self.previous_hash)).encode('utf-8'))
-        return sha.hexdigest()
-
-# for the first block
-def create_genesis_block():
-    """To create each block, it needs the hash of the previous one. First
-    block has no previous, so it must be created manually (with index zero
-     and arbitrary previous hash)"""
-    return Block(0, time.time(), {"proof-of-work": 9, "transactions": None}, "0")
 
 # ------------------------------------ PoW and mining
-
-def did_i_succeed(current, last_proof): # TODO, replace with a more complex one
-    return current % 7919 == 0 and current % last_proof == 0
 
 def proof_of_work(last_proof, blockchain):
     # Creates a variable that we will use to find our next proof of work
@@ -59,7 +17,7 @@ def proof_of_work(last_proof, blockchain):
     # Keep incrementing the incrementer until it's equal to a number divisible by 7919 (... a prime i guess)
     # and the proof of work of the previous block in the chain
     start_time = time.time()
-    while not did_i_succeed(incrementer, last_proof):
+    while not myUtils.validate_nonce(incrementer, last_proof):
         incrementer += 1
         # Check if any node found the solution every 60 seconds
         if int((time.time()-start_time) % 60) == 0:
@@ -71,8 +29,7 @@ def proof_of_work(last_proof, blockchain):
     # Once that number is found, we can return it as a proof of our work
     return incrementer, blockchain
 
-
-def mine(a, blockchain, node_pending_transactions):
+def mine(blockchain, node_pending_transactions):
     # this is the actual blockchain structure in miner
     BLOCKCHAIN = blockchain
     NODE_PENDING_TRANSACTIONS = node_pending_transactions
@@ -104,7 +61,7 @@ def mine(a, blockchain, node_pending_transactions):
             NODE_PENDING_TRANSACTIONS = json.loads(NODE_PENDING_TRANSACTIONS)
             # Then we add the mining reward
             NODE_PENDING_TRANSACTIONS.append({
-                "from": "network",
+                "from": "[mining reward]",
                 "to": MINER_ADDRESS,
                 "amount": 1})
             # Now we can gather the data needed to create the new block
@@ -162,18 +119,11 @@ def find_new_chains():
         # Convert the JSON object to a Python dictionary
         block = json.loads(block)
         # Verify other node block is correct
-        validated = validate_blockchain(block)
+        validated = myUtils.validate_blockchain(block)
         if validated:
             # Add it to our list
             other_chains.append(block)
     return other_chains
-
-def validate_blockchain(block):
-    """Validate the submitted chain. If hashes are not correct, return false
-    block(str): json
-    """
-    # TODO validate
-    return True
 
 # ------------------------------------ HTTP server 
 node = Flask(__name__)
@@ -218,7 +168,7 @@ def transaction():
         # On each new POST request, we extract the transaction data
         new_txion = request.get_json()
         # Then we add the transaction to our list
-        if validate_signature(new_txion['from'], new_txion['signature'], new_txion['message']):
+        if myUtils.validate_signature(new_txion['from'], new_txion['signature'], new_txion['message']):
             NODE_PENDING_TRANSACTIONS.append(new_txion)
             # Because the transaction was successfully
             # submitted, we log it to our console
@@ -238,33 +188,18 @@ def transaction():
         return pending
 
 
-def validate_signature(public_key, signature, message):
-    """Verifies if the signature is correct. This is used to prove
-    it's you (and not someone else) trying to do a transaction with your
-    address. Called when a user tries to submit a new transaction.
-    """
-    public_key = (base64.b64decode(public_key)).hex()
-    signature = base64.b64decode(signature)
-    vk = ecdsa.VerifyingKey.from_string(bytes.fromhex(public_key), curve=ecdsa.SECP256k1)
-    # Try changing into an if/else statement as except is too broad.
-    try:
-        return vk.verify(signature, message.encode())
-    except:
-        return False
-
-
-# ------------------------------------ INIT 2 processes 
+# ------------------------------------ INIT two processes 
 
 if __name__ == '__main__':
     print("SpeCoin modified from https://github.com/cosme12/SimpleCoin \n WiNGS.Bangya in Summer2021 \n")
 
-    # pipe for interprocess communication
+    # pipe for interprocess communication, use as global variables
     a, b = Pipe()
 
     # Start mining
-    p1 = Process(target=mine, args=(a, BLOCKCHAIN, NODE_PENDING_TRANSACTIONS))
+    p1 = Process(target=mine, args=(BLOCKCHAIN, NODE_PENDING_TRANSACTIONS))
     p1.start()
 
     # Start server to receive transactions
-    p2 = Process(target=node.run(), args=b)
+    p2 = Process(target=node.run())
     p2.start()
