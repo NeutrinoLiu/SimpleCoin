@@ -9,9 +9,7 @@ import ecdsa
 
 from miner_config import MINER_ADDRESS, MINER_NODE_URL, PEER_NODES
 
-node = Flask(__name__)
-
-
+# ------------------------------------ BLOCK class
 class Block:
     def __init__(self, index, timestamp, data, previous_hash):
         """Returns a new Block object. Each block is "chained" to its previous
@@ -43,35 +41,25 @@ class Block:
         sha.update((str(self.index) + str(self.timestamp) + str(self.data) + str(self.previous_hash)).encode('utf-8'))
         return sha.hexdigest()
 
-
+# for the first block
 def create_genesis_block():
     """To create each block, it needs the hash of the previous one. First
     block has no previous, so it must be created manually (with index zero
      and arbitrary previous hash)"""
-    return Block(0, time.time(), {
-        "proof-of-work": 9,
-        "transactions": None},
-        "0")
+    return Block(0, time.time(), {"proof-of-work": 9, "transactions": None}, "0")
 
+# ------------------------------------ PoW and mining
 
-# Node's blockchain copy
-BLOCKCHAIN = [create_genesis_block()]
-
-""" Stores the transactions that this node has in a list.
-If the node you sent the transaction adds a block
-it will get accepted, but there is a chance it gets
-discarded and your transaction goes back as if it was never
-processed"""
-NODE_PENDING_TRANSACTIONS = []
-
+def did_i_succeed(current, last_proof): # TODO, replace with a more complex one
+    return current % 7919 == 0 and current % last_proof == 0
 
 def proof_of_work(last_proof, blockchain):
     # Creates a variable that we will use to find our next proof of work
     incrementer = last_proof + 1
-    # Keep incrementing the incrementer until it's equal to a number divisible by 9
+    # Keep incrementing the incrementer until it's equal to a number divisible by 7919 (... a prime i guess)
     # and the proof of work of the previous block in the chain
     start_time = time.time()
-    while not (incrementer % 7919 == 0 and incrementer % last_proof == 0):
+    while not did_i_succeed(incrementer, last_proof):
         incrementer += 1
         # Check if any node found the solution every 60 seconds
         if int((time.time()-start_time) % 60) == 0:
@@ -85,6 +73,7 @@ def proof_of_work(last_proof, blockchain):
 
 
 def mine(a, blockchain, node_pending_transactions):
+    # this is the actual blockchain structure in miner
     BLOCKCHAIN = blockchain
     NODE_PENDING_TRANSACTIONS = node_pending_transactions
     while True:
@@ -95,16 +84,19 @@ def mine(a, blockchain, node_pending_transactions):
         # Get the last proof of work
         last_block = BLOCKCHAIN[-1]
         last_proof = last_block.data['proof-of-work']
+        
         # Find the proof of work for the current block being mined
         # Note: The program will hang here until a new proof of work is found
         proof = proof_of_work(last_proof, BLOCKCHAIN)
-        # If we didn't guess the proof, start mining again
-        if not proof[0]:
+        # this is why we need two process: one for pow, one for server who gathers transactions
+        # TODO: pause all the other nodes when we find the pow
+
+        if not proof[0]:    # some one else is the leader now
             # Update blockchain and save it to file
             BLOCKCHAIN = proof[1]
             a.send(BLOCKCHAIN)
             continue
-        else:
+        else:               # this miner is chosen as leader
             # Once we find a valid proof of work, we know we can mine a block so
             # ...we reward the miner by adding a transaction
             # First we load all pending transactions sent to the node server
@@ -136,24 +128,13 @@ def mine(a, blockchain, node_pending_transactions):
               "hash": last_block_hash
             }) + "\n")
             a.send(BLOCKCHAIN)
-            requests.get(url = MINER_NODE_URL + '/blocks', params = {'update':MINER_ADDRESS})
+            # ask http server to fetch the latest chain
+            requests.get(url = MINER_NODE_URL + '/blocks', params = {'update':MINER_ADDRESS}) 
 
-def find_new_chains():
-    # Get the blockchains of every other node
-    other_chains = []
-    for node_url in PEER_NODES:
-        # Get their chains using a GET request
-        block = requests.get(url = node_url + "/blocks").content
-        # Convert the JSON object to a Python dictionary
-        block = json.loads(block)
-        # Verify other node block is correct
-        validated = validate_blockchain(block)
-        if validated:
-            # Add it to our list
-            other_chains.append(block)
-    return other_chains
+# ------------------------------------ CONSENSUS implementation
 
-
+# asking for the latest chain in the network
+# return False means I am the latest
 def consensus(blockchain):
     # Get the blocks from other nodes
     other_chains = find_new_chains()
@@ -172,17 +153,42 @@ def consensus(blockchain):
         BLOCKCHAIN = longest_chain
         return BLOCKCHAIN
 
+def find_new_chains():
+    # Get the blockchains of every other node
+    other_chains = []
+    for node_url in PEER_NODES:
+        # Get their chains using a GET request
+        block = requests.get(url = node_url + "/blocks").content
+        # Convert the JSON object to a Python dictionary
+        block = json.loads(block)
+        # Verify other node block is correct
+        validated = validate_blockchain(block)
+        if validated:
+            # Add it to our list
+            other_chains.append(block)
+    return other_chains
 
 def validate_blockchain(block):
     """Validate the submitted chain. If hashes are not correct, return false
     block(str): json
     """
+    # TODO validate
     return True
 
+# ------------------------------------ HTTP server 
+node = Flask(__name__)
+
+# Node's blockchain mirror, only for the server, NOT an active one
+# there might be some problem with time stamp in genesis block. but we just ignore it here
+BLOCKCHAIN = [create_genesis_block()]
+
+# transcation pool, for server to gather transactions unstoppaly 
+NODE_PENDING_TRANSACTIONS = []
 
 @node.route('/blocks', methods=['GET'])
 def get_blocks():
     # Load current blockchain. Only you should update your blockchain
+    # "update" is a flag here ask the server to fetch the latest chain
     if request.args.get("update") == MINER_ADDRESS:
         global BLOCKCHAIN
         BLOCKCHAIN = b.recv()
@@ -201,7 +207,6 @@ def get_blocks():
     # Send our chain to whomever requested it
     chain_to_send = json.dumps(chain_to_send_json)
     return chain_to_send
-
 
 @node.route('/txion', methods=['GET', 'POST'])
 def transaction():
@@ -248,21 +253,18 @@ def validate_signature(public_key, signature, message):
         return False
 
 
-def welcome_msg():
-    print("""       =========================================\n
-        SIMPLE COIN v1.0.0 - BLOCKCHAIN SYSTEM\n
-       =========================================\n\n
-        You can find more help at: https://github.com/cosme12/SimpleCoin\n
-        Make sure you are using the latest version or you may end in
-        a parallel chain.\n\n\n""")
-
+# ------------------------------------ INIT 2 processes 
 
 if __name__ == '__main__':
-    welcome_msg()
-    # Start mining
+    print("SpeCoin modified from https://github.com/cosme12/SimpleCoin \n WiNGS.Bangya in Summer2021 \n")
+
+    # pipe for interprocess communication
     a, b = Pipe()
+
+    # Start mining
     p1 = Process(target=mine, args=(a, BLOCKCHAIN, NODE_PENDING_TRANSACTIONS))
     p1.start()
+
     # Start server to receive transactions
     p2 = Process(target=node.run(), args=b)
     p2.start()
